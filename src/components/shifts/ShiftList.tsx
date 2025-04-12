@@ -40,45 +40,56 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
       loadMatrix(currentWeekStart);
       loadSwaps();
 
-      // Subscription per gli aggiornamenti della matrice dei turni
-      const matrixSubscription = supabase
-        .channel('shifts_schedule_changes')
+      // Subscription per gli scambi in tempo reale
+      const channel = supabase.channel('realtime-shifts')
         .on(
           'postgres_changes',
           {
             event: '*',
             schema: 'public',
-            table: 'shifts_schedule'
+            table: 'shift_swaps_v2',
           },
-          () => {
-            loadMatrix(currentWeekStart);
+          async (payload) => {
+            console.log('Cambio rilevato:', payload);
+            // Aggiorna immediatamente lo stato locale
+            if (payload.eventType === 'INSERT') {
+              const newSwap = {
+                id: payload.new.id,
+                date: payload.new.date,
+                fromEmployee: payload.new.from_employee,
+                toEmployee: payload.new.to_employee,
+                fromShift: payload.new.from_shift,
+                toShift: payload.new.to_shift,
+                status: payload.new.status
+              };
+              setSwaps(current => [newSwap, ...current]);
+            } else if (payload.eventType === 'UPDATE') {
+              setSwaps(current => 
+                current.map(swap => 
+                  swap.id === payload.new.id 
+                    ? {
+                        ...swap,
+                        status: payload.new.status
+                      }
+                    : swap
+                )
+              );
+            }
+            // Ricarica la matrice per riflettere eventuali cambiamenti
+            if (payload.new && 'status' in payload.new && payload.new.status === 'accepted') {
+              await loadMatrix(currentWeekStart);
+            }
           }
         )
-        .subscribe();
+        .subscribe(status => {
+          console.log('Status subscription:', status);
+        });
 
-      // Subscription per gli aggiornamenti degli scambi
-      const swapsSubscription = supabase
-        .channel('shift_swaps_changes')
-        .on(
-          'postgres_changes',
-          {
-            event: '*',
-            schema: 'public',
-            table: 'shift_swaps_v2'
-          },
-          () => {
-            loadSwaps();
-          }
-        )
-        .subscribe();
-
-      // Pulizia delle subscriptions quando il componente viene smontato
       return () => {
-        matrixSubscription.unsubscribe();
-        swapsSubscription.unsubscribe();
+        channel.unsubscribe();
       };
     }
-  }, [currentWeekStart, user]);
+  }, [user, currentWeekStart]);
 
   const checkAdminStatus = async () => {
     try {
@@ -295,13 +306,13 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
 
     try {
       setIsLoading(true);
+      setError(null);
 
       const swap = swaps.find(s => s.id === swapId);
       if (!swap) return;
 
-      // Only allow admins or involved users to accept/reject
       if (!isAdmin && swap.toEmployee !== currentEmployeeCode) {
-        console.error('Unauthorized action');
+        setError('Non autorizzato a rispondere a questa richiesta');
         return;
       }
 
@@ -312,21 +323,9 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
 
       if (updateError) throw updateError;
 
-      // Crea notifica per chi ha richiesto lo scambio
-      const message = accept 
-        ? `${swap.toEmployee} ha accettato la tua richiesta di scambio per il ${formatDate(swap.date)}`
-        : `${swap.toEmployee} ha rifiutato la tua richiesta di scambio per il ${formatDate(swap.date)}`;
-      
-      await createNotification(
-        user?.id || '',
-        message,
-        accept ? 'swap_accepted' : 'swap_rejected',
-        swapId
-      );
-
-      await loadSwaps();
     } catch (err) {
       console.error('Error updating swap:', err);
+      setError('Errore nell\'aggiornamento della richiesta di scambio');
     } finally {
       setIsLoading(false);
     }
@@ -408,8 +407,9 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
   const createSwapRequest = async (date: string, fromEmployee: string, toEmployee: string, fromShift: string, toShift: string, autoAccept: boolean = false) => {
     try {
       setIsLoading(true);
+      setError(null);
 
-      const { data: insertedSwap, error: insertError } = await supabase
+      const { error: insertError } = await supabase
         .from('shift_swaps_v2')
         .insert({
           date: date.split('/').reverse().join('-'),
@@ -418,26 +418,13 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
           from_shift: fromShift,
           to_shift: toShift,
           status: autoAccept ? 'accepted' : 'pending'
-        })
-        .select()
-        .single();
+        });
 
       if (insertError) throw insertError;
-
-      // Crea notifica per chi riceve la richiesta di scambio
-      if (!autoAccept) {
-        const message = `${fromEmployee} ha richiesto uno scambio turno per il ${formatDate(date)}`;
-        await createNotification(
-          user?.id || '',
-          message,
-          'swap_request',
-          insertedSwap.id
-        );
-      }
-
-      await loadSwaps();
+      
     } catch (err) {
       console.error('Error creating swap request:', err);
+      setError('Errore nella creazione della richiesta di scambio');
     } finally {
       setIsLoading(false);
     }
