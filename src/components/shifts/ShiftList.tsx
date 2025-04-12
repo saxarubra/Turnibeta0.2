@@ -280,6 +280,57 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
     }
   };
 
+  const handleSwapRequest = async (fromDate: string, fromEmployee: string, toEmployee: string, fromShift: string, toShift: string) => {
+    if (isLoading) return;
+
+    try {
+      setIsLoading(true);
+      setError(null);
+
+      // Verifica le restrizioni per gli account non admin
+      if (!isAdmin) {
+        // Impedisci lo scambio di RI e NL
+        if (fromShift === 'RI' || fromShift === 'NL' || toShift === 'RI' || toShift === 'NL') {
+          setError('Non è possibile scambiare i turni RI e NL');
+          return;
+        }
+
+        // Impedisci lo scambio della prima colonna (sigle)
+        const fromShiftIndex = matrix[0].findIndex(s => s === fromShift);
+        if (fromShiftIndex === 0) {
+          setError('Non è possibile scambiare i turni della prima colonna');
+          return;
+        }
+      }
+
+      // Procedi con la creazione della richiesta di scambio
+      const { error: insertError } = await supabase
+        .from('shift_swaps_v2')
+        .insert({
+          date: fromDate.split('/').reverse().join('-'),
+          from_employee: fromEmployee,
+          to_employee: toEmployee,
+          from_shift: fromShift,
+          to_shift: toShift,
+          // Lo scambio viene accettato automaticamente SOLO se l'utente corrente è admin
+          status: isAdmin ? 'accepted' : 'pending'
+        });
+
+      if (insertError) throw insertError;
+      await loadSwaps();
+      // Se l'admin ha fatto lo scambio, aggiorna immediatamente la matrice
+      if (isAdmin) {
+        await loadMatrix(currentWeekStart);
+      }
+
+    } catch (err) {
+      console.error('Error creating swap request:', err);
+      setError('Errore nella creazione della richiesta di scambio');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const handleSwapResponse = async (swapId: string, accept: boolean) => {
     if (isLoading) return;
 
@@ -290,6 +341,8 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
       const swap = swaps.find(s => s.id === swapId);
       if (!swap) return;
 
+      // Solo l'admin può accettare/rifiutare qualsiasi scambio
+      // Gli utenti normali possono solo accettare/rifiutare scambi proposti a loro
       if (!isAdmin && swap.toEmployee !== currentEmployeeCode) {
         setError('Non autorizzato a rispondere a questa richiesta');
         return;
@@ -302,7 +355,6 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
 
       if (updateError) throw updateError;
       
-      // Ricarica immediatamente dopo l'aggiornamento
       await loadSwaps();
       if (accept) {
         await loadMatrix(currentWeekStart);
