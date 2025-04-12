@@ -7,6 +7,7 @@ import ShiftList from './components/shifts/ShiftList';
 import { MatrixUploader } from './components/shifts/MatrixUploader';
 import { LogOut, User, RefreshCw } from 'lucide-react';
 import { supabase } from './lib/supabase';
+import Notifications from './components/Notifications';
 
 export default function App() {
   const { user, loading, signOut } = useAuth();
@@ -16,8 +17,14 @@ export default function App() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  React.useEffect(() => {
+  useEffect(() => {
     checkAdminStatus();
+  }, [user]);
+
+  useEffect(() => {
+    if (user) {
+      loadLatestSchedule();
+    }
   }, [user]);
 
   const checkAdminStatus = async () => {
@@ -40,6 +47,26 @@ export default function App() {
       console.error('Error checking admin status:', err);
       setError(err.message);
       setIsAdmin(false);
+    }
+  };
+
+  const loadLatestSchedule = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('shifts_schedule')
+        .select('week_start_date')
+        .order('week_start_date', { ascending: false })
+        .limit(1)
+        .single();
+
+      if (error) throw error;
+
+      if (data) {
+        setCurrentWeekStart(data.week_start_date);
+        setShowMatrix(true);
+      }
+    } catch (err) {
+      console.error('Error loading latest schedule:', err);
     }
   };
 
@@ -86,6 +113,19 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gray-100">
+      <nav className="bg-white shadow-sm">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex justify-between h-16">
+            <div className="flex items-center">
+              {/* Logo o titolo */}
+            </div>
+            <div className="flex items-center">
+              <Notifications />
+              {/* Altri elementi della navbar */}
+            </div>
+          </div>
+        </div>
+      </nav>
       <header className="bg-white shadow">
         <div className="max-w-7xl mx-auto px-4 py-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center">
@@ -166,7 +206,7 @@ export default function App() {
       )}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="mt-6">
-          {!showMatrix ? (
+          {isAdmin && !showMatrix ? (
             <MatrixUploader onUploadComplete={handleUploadSuccess} />
           ) : (
             <ShiftList initialDate={currentWeekStart} />

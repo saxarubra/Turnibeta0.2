@@ -24,7 +24,7 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
   const [matrix, setMatrix] = useState<Matrix>([]);
   const [selectedCells, setSelectedCells] = useState<[number, number][]>([]);
   const [swaps, setSwaps] = useState<SwapRequest[]>([]);
-  const [currentWeekStart] = useState(initialDate ? new Date(initialDate) : new Date());
+  const [currentWeekStart, setCurrentWeekStart] = useState(initialDate ? new Date(initialDate) : new Date());
   const [showUploader, setShowUploader] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -40,40 +40,45 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
       loadMatrix(currentWeekStart);
       loadSwaps();
 
-      // Imposta un intervallo per controllare gli aggiornamenti ogni 5 secondi
-      const intervalId = setInterval(() => {
-        loadSwaps();
-        loadMatrix(currentWeekStart);
-      }, 5000);
-
-      // Pulisci l'intervallo quando il componente viene smontato
-      return () => clearInterval(intervalId);
-    }
-  }, [currentWeekStart, user]);
-
-  // Aggiungi una subscription ai cambiamenti della tabella shift_swaps_v2
-  useEffect(() => {
-    if (user) {
-      const subscription = supabase
-        .channel('shift_swaps_changes')
-        .on('postgres_changes', 
+      // Subscription per gli aggiornamenti della matrice dei turni
+      const matrixSubscription = supabase
+        .channel('shifts_schedule_changes')
+        .on(
+          'postgres_changes',
           {
             event: '*',
             schema: 'public',
-            table: 'shift_swaps_v2'
-          }, 
+            table: 'shifts_schedule'
+          },
           () => {
-            loadSwaps();
             loadMatrix(currentWeekStart);
           }
         )
         .subscribe();
 
+      // Subscription per gli aggiornamenti degli scambi
+      const swapsSubscription = supabase
+        .channel('shift_swaps_changes')
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'shift_swaps_v2'
+          },
+          () => {
+            loadSwaps();
+          }
+        )
+        .subscribe();
+
+      // Pulizia delle subscriptions quando il componente viene smontato
       return () => {
-        subscription.unsubscribe();
+        matrixSubscription.unsubscribe();
+        swapsSubscription.unsubscribe();
       };
     }
-  }, [user, currentWeekStart]);
+  }, [currentWeekStart, user]);
 
   const checkAdminStatus = async () => {
     try {
@@ -121,10 +126,26 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
 
         setMatrix([headerRow, daysRow, ...matrixData]);
       } else {
-        setMatrix([]);
+        // Se non ci sono dati, controlla se ci sono dati per altre date
+        const { data: latestData, error: latestError } = await supabase
+          .from('shifts_schedule')
+          .select('week_start_date')
+          .order('week_start_date', { ascending: false })
+          .limit(1)
+          .single();
+
+        if (!latestError && latestData) {
+          // Se esistono dati per un'altra data, carica quelli
+          const newDate = new Date(latestData.week_start_date);
+          setCurrentWeekStart(newDate);
+          loadMatrix(newDate);
+        } else {
+          setMatrix([]);
+        }
       }
     } catch (err) {
       console.error('Error loading matrix:', err);
+      setError('Errore nel caricamento dei turni');
     }
   };
 
@@ -256,38 +277,16 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
     });
   };
 
-  const createSwapRequest = async (
-    date: string, 
-    fromEmployee: string, 
-    toEmployee: string, 
-    fromShift: string, 
-    toShift: string,
-    autoAccept: boolean = false
-  ) => {
+  const createNotification = async (userId: string, message: string, type: string, swapId: string) => {
     try {
-      setIsLoading(true);
-
-      // Se è admin, usa la data della seconda cella selezionata
-      const formattedDate = date.split('/').reverse().join('-');
-
-      const { error: insertError } = await supabase
-        .from('shift_swaps_v2')
-        .insert({
-          date: formattedDate,
-          from_employee: fromEmployee,
-          to_employee: toEmployee,
-          from_shift: fromShift,
-          to_shift: toShift,
-          status: autoAccept ? 'accepted' : 'pending'
-        });
-
-      if (insertError) throw insertError;
-
-      await loadSwaps();
-    } catch (err) {
-      console.error('Error creating swap request:', err);
-    } finally {
-      setIsLoading(false);
+      await supabase.from('notifications').insert({
+        user_id: userId,
+        message,
+        type,
+        related_swap_id: swapId
+      });
+    } catch (error) {
+      console.error('Error creating notification:', error);
     }
   };
 
@@ -312,6 +311,19 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
         .eq('id', swapId);
 
       if (updateError) throw updateError;
+
+      // Crea notifica per chi ha richiesto lo scambio
+      const message = accept 
+        ? `${swap.toEmployee} ha accettato la tua richiesta di scambio per il ${formatDate(swap.date)}`
+        : `${swap.toEmployee} ha rifiutato la tua richiesta di scambio per il ${formatDate(swap.date)}`;
+      
+      await createNotification(
+        user?.id || '',
+        message,
+        accept ? 'swap_accepted' : 'swap_rejected',
+        swapId
+      );
+
       await loadSwaps();
     } catch (err) {
       console.error('Error updating swap:', err);
@@ -390,6 +402,44 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
     if (file) {
       const jsonData = await convertPdfToJson(file);
       setUploadedJson(jsonData);
+    }
+  };
+
+  const createSwapRequest = async (date: string, fromEmployee: string, toEmployee: string, fromShift: string, toShift: string, autoAccept: boolean = false) => {
+    try {
+      setIsLoading(true);
+
+      const { data: insertedSwap, error: insertError } = await supabase
+        .from('shift_swaps_v2')
+        .insert({
+          date: date.split('/').reverse().join('-'),
+          from_employee: fromEmployee,
+          to_employee: toEmployee,
+          from_shift: fromShift,
+          to_shift: toShift,
+          status: autoAccept ? 'accepted' : 'pending'
+        })
+        .select()
+        .single();
+
+      if (insertError) throw insertError;
+
+      // Crea notifica per chi riceve la richiesta di scambio
+      if (!autoAccept) {
+        const message = `${fromEmployee} ha richiesto uno scambio turno per il ${formatDate(date)}`;
+        await createNotification(
+          user?.id || '',
+          message,
+          'swap_request',
+          insertedSwap.id
+        );
+      }
+
+      await loadSwaps();
+    } catch (err) {
+      console.error('Error creating swap request:', err);
+    } finally {
+      setIsLoading(false);
     }
   };
 
