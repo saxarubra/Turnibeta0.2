@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { Check, X, Upload } from 'lucide-react';
+import { Check, X } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
-import { MatrixUploader } from './MatrixUploader';
+import PDFExport from './PDFExport';
+import { PDFDocument } from 'pdf-lib';
 
 type Matrix = string[][];
 type SwapRequest = {
@@ -23,12 +24,13 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
   const [matrix, setMatrix] = useState<Matrix>([]);
   const [selectedCells, setSelectedCells] = useState<[number, number][]>([]);
   const [swaps, setSwaps] = useState<SwapRequest[]>([]);
-  const [currentWeekStart, setCurrentWeekStart] = useState(initialDate ? new Date(initialDate) : new Date());
+  const [currentWeekStart] = useState(initialDate ? new Date(initialDate) : new Date());
   const [showUploader, setShowUploader] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { user } = useAuth();
+  const [uploadedJson, setUploadedJson] = useState<any>(null);
 
   const currentEmployeeCode = user?.user_metadata?.full_name;
 
@@ -37,8 +39,41 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
       checkAdminStatus();
       loadMatrix(currentWeekStart);
       loadSwaps();
+
+      // Imposta un intervallo per controllare gli aggiornamenti ogni 5 secondi
+      const intervalId = setInterval(() => {
+        loadSwaps();
+        loadMatrix(currentWeekStart);
+      }, 5000);
+
+      // Pulisci l'intervallo quando il componente viene smontato
+      return () => clearInterval(intervalId);
     }
   }, [currentWeekStart, user]);
+
+  // Aggiungi una subscription ai cambiamenti della tabella shift_swaps_v2
+  useEffect(() => {
+    if (user) {
+      const subscription = supabase
+        .channel('shift_swaps_changes')
+        .on('postgres_changes', 
+          {
+            event: '*',
+            schema: 'public',
+            table: 'shift_swaps_v2'
+          }, 
+          () => {
+            loadSwaps();
+            loadMatrix(currentWeekStart);
+          }
+        )
+        .subscribe();
+
+      return () => {
+        subscription.unsubscribe();
+      };
+    }
+  }, [user, currentWeekStart]);
 
   const checkAdminStatus = async () => {
     try {
@@ -118,7 +153,16 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
       if (error) throw error;
 
       if (data) {
-        setSwaps(data.map(swap => ({
+        // Filtra i duplicati basandosi sulla data e sulle persone coinvolte
+        const uniqueSwaps = data.reduce<Record<string, any>>((acc, swap) => {
+          const key = `${swap.date}-${swap.from_employee}-${swap.to_employee}`;
+          if (!acc[key]) {
+            acc[key] = swap;
+          }
+          return acc;
+        }, {});
+
+        setSwaps(Object.values(uniqueSwaps).map(swap => ({
           id: swap.id,
           date: swap.date,
           fromEmployee: swap.from_employee,
@@ -166,7 +210,6 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
 
     const employeeCode = matrix[row][0];
     const date = matrix[0][col];
-    const currentShift = getFinalShift(row, col);
 
     setSelectedCells(prev => {
       if (prev.length === 0) {
@@ -200,14 +243,10 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
         const fromShift = getFinalShift(firstRow, firstCol);
         const toShift = getFinalShift(row, col);
 
-        // Se è admin, crea due scambi per gestire date diverse
+        // Se è admin, crea un solo scambio invece di due
         if (isAdmin && fromDate !== toDate) {
-          // Primo scambio: dalla prima data
           createSwapRequest(fromDate, fromEmployee, toEmployee, fromShift, toShift, true);
-          // Secondo scambio: dalla seconda data
-          createSwapRequest(toDate, toEmployee, fromEmployee, toShift, fromShift, true);
         } else {
-          // Scambio normale
           createSwapRequest(date, fromEmployee, toEmployee, fromShift, toShift, isAdmin);
         }
         return [];
@@ -257,6 +296,15 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
 
     try {
       setIsLoading(true);
+
+      const swap = swaps.find(s => s.id === swapId);
+      if (!swap) return;
+
+      // Only allow admins or involved users to accept/reject
+      if (!isAdmin && swap.toEmployee !== currentEmployeeCode) {
+        console.error('Unauthorized action');
+        return;
+      }
 
       const { error: updateError } = await supabase
         .from('shift_swaps_v2')
@@ -310,6 +358,39 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
   const formatDate = (dateStr: string) => {
     const [year, month, day] = dateStr.split('-');
     return `${day}/${month}/${year}`;
+  };
+
+  async function convertPdfToJson(file: File) {
+    const arrayBuffer = await file.arrayBuffer();
+    const pdfDoc = await PDFDocument.load(arrayBuffer);
+    const pages = pdfDoc.getPages();
+    const jsonData = { week_start_date: '', shifts: [] };
+
+    // Example logic to extract data from the PDF
+    pages.forEach((page) => {
+      // Manually extract and parse text content from the page
+      // This is a placeholder for actual parsing logic
+      // jsonData.shifts.push({ employee_code: 'CA', ... });
+    });
+
+    return jsonData;
+  }
+
+  const handleJsonUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      const text = await file.text();
+      const jsonData = JSON.parse(text);
+      setUploadedJson(jsonData);
+    }
+  };
+
+  const handlePdfUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      const jsonData = await convertPdfToJson(file);
+      setUploadedJson(jsonData);
+    }
   };
 
   return (
@@ -444,8 +525,6 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Data</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Da</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">A</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Turno Da</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Turno A</th>
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Stato</th>
                 </tr>
               </thead>
@@ -453,10 +532,12 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
                 {swaps.map((swap) => (
                   <tr key={swap.id} className="hover:bg-gray-50">
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{formatDate(swap.date)}</td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{swap.fromEmployee}</td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{swap.toEmployee}</td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{swap.fromShift}</td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{swap.toShift}</td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                      {swap.fromEmployee} ({swap.fromShift})
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                      {swap.toEmployee} ({swap.toShift})
+                    </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
                         swap.status === 'accepted' ? 'bg-green-100 text-green-800' :
@@ -477,6 +558,8 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
           </div>
         </div>
       </div>
+
+      <PDFExport matrix={matrix} />
     </div>
   );
 }

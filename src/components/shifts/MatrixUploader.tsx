@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Upload, FileUp, AlertCircle } from 'lucide-react';
+import React, { useState } from 'react';
+import { Upload } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
 
@@ -12,6 +12,7 @@ interface ShiftData {
   thursday_shift?: string;
   friday_shift?: string;
   saturday_shift?: string;
+  [key: string]: string | undefined;
 }
 
 interface MatrixData {
@@ -20,159 +21,68 @@ interface MatrixData {
 }
 
 interface MatrixUploaderProps {
-  onUploadSuccess: (date: string) => void;
+  onUploadComplete: (date: string) => void;
 }
 
-export function MatrixUploader({ onUploadSuccess }: MatrixUploaderProps) {
-  const [uploading, setUploading] = useState(false);
+export function MatrixUploader({ onUploadComplete }: MatrixUploaderProps) {
+  const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState(false);
   const { user } = useAuth();
 
-  const validateShiftData = (shift: any, index: number): shift is ShiftData => {
-    if (!shift || typeof shift !== 'object') {
-      throw new Error(`Invalid shift data at index ${index}: must be an object`);
-    }
-
-    if (!shift.employee_code || typeof shift.employee_code !== 'string') {
-      throw new Error(`Invalid shift data at index ${index}: employee_code is required and must be a string`);
-    }
-
-    const shiftFields = ['sunday_shift', 'monday_shift', 'tuesday_shift', 
-                        'wednesday_shift', 'thursday_shift', 'friday_shift', 
-                        'saturday_shift'];
-    
-    for (const field of shiftFields) {
-      if (shift[field] !== undefined && typeof shift[field] !== 'string') {
-        throw new Error(`Invalid shift data at index ${index}: ${field} must be a string if present`);
-      }
-    }
-
-    return true;
-  };
-
-  const validateMatrixData = (data: any): data is MatrixData => {
-    if (!data || typeof data !== 'object') {
-      throw new Error('Invalid JSON format: must be an object');
-    }
-
-    if (!data.week_start_date) {
-      throw new Error('Invalid JSON format: week_start_date is missing');
-    }
-    if (typeof data.week_start_date !== 'string') {
-      throw new Error('Invalid JSON format: week_start_date must be a string');
-    }
-
-    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-    if (!dateRegex.test(data.week_start_date)) {
-      throw new Error('Invalid JSON format: week_start_date must be in YYYY-MM-DD format');
-    }
-
-    if (!Array.isArray(data.shifts)) {
-      throw new Error('Invalid JSON format: shifts must be an array');
-    }
-    if (data.shifts.length === 0) {
-      throw new Error('Invalid JSON format: shifts array cannot be empty');
-    }
-
-    data.shifts.forEach((shift, index) => {
-      validateShiftData(shift, index);
-    });
-
-    return true;
-  };
-
-  const saveToDB = async (data: MatrixData) => {
-    // Check if user is admin
-    if (user?.user_metadata?.full_name !== 'ADMIN') {
-      throw new Error('Solo gli amministratori possono caricare la matrice dei turni');
-    }
-
-    // First delete all notifications
-    await supabase
-      .from('notifications')
-      .delete()
-      .filter('id', 'not.is', null);
-
-    // Then delete all swaps
-    await supabase
-      .from('shift_swaps_v2')
-      .delete()
-      .filter('id', 'not.is', null);
-
-    // Clear existing data for the week
-    await supabase
-      .from('shifts_schedule')
-      .delete()
-      .eq('week_start_date', data.week_start_date);
-
-    // Insert the new shifts with display order
-    for (let i = 0; i < data.shifts.length; i++) {
-      const shift = data.shifts[i];
-      const { error } = await supabase
-        .from('shifts_schedule')
-        .insert({
-          week_start_date: data.week_start_date,
-          employee_code: shift.employee_code,
-          sunday_shift: shift.sunday_shift,
-          monday_shift: shift.monday_shift,
-          tuesday_shift: shift.tuesday_shift,
-          wednesday_shift: shift.wednesday_shift,
-          thursday_shift: shift.thursday_shift,
-          friday_shift: shift.friday_shift,
-          saturday_shift: shift.saturday_shift,
-          display_order: i
-        });
-
-      if (error) throw error;
-    }
-  };
-
-  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    setUploading(true);
+    setIsLoading(true);
     setError(null);
-    setSuccess(false);
 
     try {
-      if (!file.name.toLowerCase().endsWith('.json')) {
-        throw new Error('Please upload a JSON file');
+      if (file.type === 'application/json') {
+        const text = await file.text();
+        const jsonData = JSON.parse(text);
+        await handleJSONUpload(jsonData);
+        onUploadComplete(jsonData.week_start_date);
+      } else {
+        throw new Error('Per favore carica un file JSON con il formato corretto.');
       }
-
-      const reader = new FileReader();
-      reader.onload = async (e) => {
-        try {
-          const text = e.target?.result;
-          if (typeof text !== 'string') {
-            throw new Error('Invalid file content');
-          }
-
-          let data: unknown;
-          try {
-            data = JSON.parse(text);
-          } catch (err) {
-            throw new Error('Invalid JSON format: File contains malformed JSON');
-          }
-
-          validateMatrixData(data);
-          await saveToDB(data as MatrixData);
-          setSuccess(true);
-          onUploadSuccess((data as MatrixData).week_start_date);
-        } catch (err: any) {
-          console.error('Error processing JSON:', err);
-          setError(err.message || 'Error processing JSON file');
-        }
-      };
-
-      reader.readAsText(file);
-    } catch (err: any) {
-      console.error('Error handling file:', err);
-      setError(err.message || 'Error processing file');
+    } catch (err) {
+      console.error('Error uploading file:', err);
+      setError(err instanceof Error ? err.message : 'Errore durante il caricamento del file');
     } finally {
-      setUploading(false);
+      setIsLoading(false);
     }
+  };
+
+  const handleJSONUpload = async (data: MatrixData) => {
+    if (!validateMatrixData(data)) {
+      throw new Error('Formato dati non valido. Controlla il formato del file.');
+    }
+
+    const { error } = await supabase
+      .from('shifts_schedule')
+      .upsert(data.shifts.map(shift => ({
+        ...shift,
+        week_start_date: data.week_start_date
+      })));
+
+    if (error) throw error;
+    onUploadComplete(data.week_start_date);
+  };
+
+  const validateMatrixData = (data: any): boolean => {
+    if (!data || typeof data !== 'object') return false;
+    if (!data.week_start_date || !Array.isArray(data.shifts)) return false;
+    if (data.shifts.length === 0) return false;
+
+    return data.shifts.every((shift: any) => 
+      shift.employee_code &&
+      typeof shift.employee_code === 'string' &&
+      ['sunday_shift', 'monday_shift', 'tuesday_shift', 
+       'wednesday_shift', 'thursday_shift', 'friday_shift', 
+       'saturday_shift'].every(day => 
+        !shift[day] || typeof shift[day] === 'string'
+      )
+    );
   };
 
   // If not admin, don't render the uploader
@@ -187,44 +97,50 @@ export function MatrixUploader({ onUploadSuccess }: MatrixUploaderProps) {
   }
 
   return (
-    <div className="p-6 bg-white rounded-lg shadow-md">
-      <div className="flex items-center justify-center w-full">
-        <label className="flex flex-col items-center justify-center w-full h-64 border-2 border-gray-300 border-dashed rounded-lg cursor-pointer bg-gray-50 hover:bg-gray-100">
-          <div className="flex flex-col items-center justify-center pt-5 pb-6">
-            {uploading ? (
-              <Upload className="w-10 h-10 mb-3 text-gray-400 animate-bounce" />
-            ) : (
-              <FileUp className="w-10 h-10 mb-3 text-gray-400" />
-            )}
-            <p className="mb-2 text-sm text-gray-500">
-              <span className="font-semibold">Clicca per caricare</span> o trascina il file
-            </p>
-            <p className="text-xs text-gray-500">File JSON contenente la matrice dei turni</p>
-          </div>
+    <div className="p-4 bg-white rounded-lg shadow">
+      <div className="flex flex-col items-center space-y-4">
+        <label className="w-full max-w-xl flex flex-col items-center px-4 py-6 bg-white rounded-lg border-2 border-dashed border-gray-300 cursor-pointer hover:border-gray-400">
+          <Upload className="w-8 h-8 text-gray-400" />
+          <span className="mt-2 text-base text-gray-600">
+            {isLoading ? 'Caricamento...' : 'Seleziona un file JSON'}
+          </span>
           <input
             type="file"
             className="hidden"
             accept=".json"
-            onChange={handleFileUpload}
-            disabled={uploading}
+            onChange={handleFileChange}
+            disabled={isLoading}
           />
         </label>
+
+        {error && (
+          <div className="w-full max-w-xl p-4 text-red-700 bg-red-100 rounded">
+            {error}
+          </div>
+        )}
+
+        <div className="w-full max-w-xl mt-4">
+          <h3 className="text-lg font-semibold mb-2">Formato JSON richiesto:</h3>
+          <pre className="bg-gray-100 p-4 rounded text-sm overflow-auto">
+{`{
+  "week_start_date": "2025-03-30",
+  "shifts": [
+    {
+      "employee_code": "CA",
+      "sunday_shift": "RI",
+      "monday_shift": "8.00",
+      "tuesday_shift": "05.55+",
+      "wednesday_shift": "05.55",
+      "thursday_shift": "06.30",
+      "friday_shift": "05.55",
+      "saturday_shift": "NL"
+    },
+    ...
+  ]
+}`}
+          </pre>
+        </div>
       </div>
-
-      {error && (
-        <div className="mt-4 p-4 bg-red-50 rounded-md flex items-start">
-          <AlertCircle className="h-5 w-5 text-red-400 mt-0.5 mr-2" />
-          <p className="text-sm text-red-700">{error}</p>
-        </div>
-      )}
-
-      {success && (
-        <div className="mt-4 p-4 bg-green-50 rounded-md">
-          <p className="text-sm text-green-700">
-            Matrice caricata con successo!
-          </p>
-        </div>
-      )}
     </div>
   );
 }

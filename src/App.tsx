@@ -5,7 +5,7 @@ import { SignUpForm } from './components/auth/SignUpForm';
 import { PasswordResetForm } from './components/auth/PasswordResetForm';
 import ShiftList from './components/shifts/ShiftList';
 import { MatrixUploader } from './components/shifts/MatrixUploader';
-import { LogOut, User } from 'lucide-react';
+import { LogOut, User, RefreshCw } from 'lucide-react';
 import { supabase } from './lib/supabase';
 
 export default function App() {
@@ -95,6 +95,57 @@ export default function App() {
                 <User className="h-4 w-4 text-indigo-500" />
                 <span className="text-sm font-medium text-indigo-700">{user.user_metadata.full_name}</span>
               </div>
+              {isAdmin && (
+                <button
+                  onClick={async () => {
+                    if (!confirm('Sei sicuro di voler resettare il database? Questa azione cancellerà tutti i turni, gli scambi e le notifiche.')) {
+                      return;
+                    }
+                    try {
+                      console.log('Iniziando il reset del database...');
+                      console.log('User ID:', user?.id);
+                      console.log('Is Admin:', isAdmin);
+
+                      // Cancella tutti i dati dalla tabella shifts_schedule
+                      const { error: shiftsError } = await supabase
+                        .from('shifts_schedule')
+                        .delete()
+                        .neq('id', '00000000-0000-0000-0000-000000000000');
+
+                      console.log('Risultato delete shifts:', { error: shiftsError });
+                      if (shiftsError) throw shiftsError;
+
+                      // Cancella tutti i dati dalla tabella shift_swaps_v2
+                      const { error: swapsError } = await supabase
+                        .from('shift_swaps_v2')
+                        .delete()
+                        .neq('id', '00000000-0000-0000-0000-000000000000');
+
+                      console.log('Risultato delete swaps:', { error: swapsError });
+                      if (swapsError) throw swapsError;
+
+                      // Cancella tutti i dati dalla tabella notifications
+                      const { error: notificationsError } = await supabase
+                        .from('notifications')
+                        .delete()
+                        .neq('id', '00000000-0000-0000-0000-000000000000');
+
+                      console.log('Risultato delete notifications:', { error: notificationsError });
+                      if (notificationsError) throw notificationsError;
+
+                      alert('Database resettato con successo!');
+                      window.location.reload();
+                    } catch (err) {
+                      console.error('Error resetting database:', err);
+                      alert('Errore durante il reset del database: ' + (err as Error).message);
+                    }
+                  }}
+                  className="flex items-center space-x-2 px-3 py-2 bg-red-500 text-white rounded-md hover:bg-red-600"
+                >
+                  <RefreshCw className="h-4 w-4" />
+                  <span>Reset DB</span>
+                </button>
+              )}
               <button
                 onClick={() => signOut()}
                 className="flex items-center space-x-2 px-3 py-2 border border-gray-300 rounded-md text-gray-700 bg-white hover:bg-gray-50"
@@ -116,7 +167,7 @@ export default function App() {
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="mt-6">
           {!showMatrix ? (
-            <MatrixUploader onUploadSuccess={handleUploadSuccess} />
+            <MatrixUploader onUploadComplete={handleUploadSuccess} />
           ) : (
             <ShiftList initialDate={currentWeekStart} />
           )}
