@@ -40,6 +40,12 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
       loadMatrix(currentWeekStart);
       loadSwaps();
 
+      // Imposta un intervallo per ricaricare i dati ogni 5 secondi
+      const intervalId = setInterval(() => {
+        loadSwaps();
+        loadMatrix(currentWeekStart);
+      }, 5000);
+
       // Subscription per gli scambi in tempo reale
       const channel = supabase.channel('realtime-shifts')
         .on(
@@ -49,44 +55,17 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
             schema: 'public',
             table: 'shift_swaps_v2',
           },
-          async (payload) => {
-            console.log('Cambio rilevato:', payload);
-            // Aggiorna immediatamente lo stato locale
-            if (payload.eventType === 'INSERT') {
-              const newSwap = {
-                id: payload.new.id,
-                date: payload.new.date,
-                fromEmployee: payload.new.from_employee,
-                toEmployee: payload.new.to_employee,
-                fromShift: payload.new.from_shift,
-                toShift: payload.new.to_shift,
-                status: payload.new.status
-              };
-              setSwaps(current => [newSwap, ...current]);
-            } else if (payload.eventType === 'UPDATE') {
-              setSwaps(current => 
-                current.map(swap => 
-                  swap.id === payload.new.id 
-                    ? {
-                        ...swap,
-                        status: payload.new.status
-                      }
-                    : swap
-                )
-              );
-            }
-            // Ricarica la matrice per riflettere eventuali cambiamenti
-            if (payload.new && 'status' in payload.new && payload.new.status === 'accepted') {
-              await loadMatrix(currentWeekStart);
-            }
+          async () => {
+            // Ricarica sia gli scambi che la matrice
+            await loadSwaps();
+            await loadMatrix(currentWeekStart);
           }
         )
-        .subscribe(status => {
-          console.log('Status subscription:', status);
-        });
+        .subscribe();
 
       return () => {
         channel.unsubscribe();
+        clearInterval(intervalId);
       };
     }
   }, [user, currentWeekStart]);
@@ -322,6 +301,12 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
         .eq('id', swapId);
 
       if (updateError) throw updateError;
+      
+      // Ricarica immediatamente dopo l'aggiornamento
+      await loadSwaps();
+      if (accept) {
+        await loadMatrix(currentWeekStart);
+      }
 
     } catch (err) {
       console.error('Error updating swap:', err);
@@ -421,6 +406,7 @@ export default function ShiftList({ initialDate }: ShiftListProps) {
         });
 
       if (insertError) throw insertError;
+      await loadSwaps(); // Ricarica gli scambi immediatamente
       
     } catch (err) {
       console.error('Error creating swap request:', err);
